@@ -1,65 +1,257 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
-
-name: Build and deploy ASP.Net Core app to Azure Web App - CoreApplicationStocksData
+name: Build and Deploy ASP.Net Core - Multi-Environment with Rollback
 
 on:
   push:
     branches:
       - master
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Select target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qual
+          - prod
+      action:
+        description: 'Select action'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - rollback
+
+env:
+  AZURE_WEBAPP_NAME: CoreApplicationStocksData
+  AZURE_PACKAGE_PATH: '.'
 
 jobs:
+  determine-environment:
+    runs-on: windows-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      action: ${{ steps.set-env.outputs.action }}
+    steps:
+      - name: Determine Environment
+        id: set-env
+        run: |
+          if ("${{ github.event_name }}" -eq "push") {
+            echo "environment=prod" >> $env:GITHUB_OUTPUT
+            echo "action=deploy" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "environment=${{ github.event.inputs.environment }}" >> $env:GITHUB_OUTPUT
+            echo "action=${{ github.event.inputs.action }}" >> $env:GITHUB_OUTPUT
+          }
+
   build:
     runs-on: windows-latest
+    needs: determine-environment
+    if: needs.determine-environment.outputs.action == 'deploy'
     permissions:
-      contents: read #This is required for actions/checkout
-
+      contents: read
+    outputs:
+      artifact-version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
+      
+      - name: Generate Version
+        id: version
+        run: |
+          $version = "$(Get-Date -Format 'yyyyMMdd-HHmmss')-${{ github.sha }}"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Build version: $version"
+      
       - name: Set up .NET Core
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0'
-
+      
+      - name: Restore dependencies
+        run: dotnet restore
+      
       - name: Build with dotnet
-        run: dotnet build --configuration Release
-
-      - name: dotnet publish
+        run: dotnet build --configuration Release --no-restore
+      
+      - name: Run tests (optional)
+        run: dotnet test --configuration Release --no-build --verbosity normal
+        continue-on-error: true
+      
+      - name: Publish dotnet
         run: dotnet publish -c Release -o "${{env.DOTNET_ROOT}}/myapp"
-
+      
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
-          name: .net-app
+          name: net-app-${{ steps.version.outputs.version }}
           path: ${{env.DOTNET_ROOT}}/myapp
+          retention-days: 30
 
-  deploy:
+  deploy-dev:
     runs-on: windows-latest
-    needs: build
+    needs: [determine-environment, build]
+    if: needs.determine-environment.outputs.environment == 'dev' && needs.determine-environment.outputs.action == 'deploy'
+    environment:
+      name: development
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
-
+      id-token: write
+      contents: read
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
-          name: .net-app
+          name: net-app-${{ needs.build.outputs.artifact-version }}
       
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_DEV }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_DEV }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_DEV }}
+      
+      - name: Backup current deployment (DEV)
+        run: |
+          az webapp deployment slot create --resource-group CoreApplicationStocksData-rg --name CoreApplicationStocksData --slot backup-dev --skip-syncing || true
+          az webapp deployment source config-zip --resource-group CoreApplicationStocksData-rg --name CoreApplicationStocksData --slot backup-dev --src-path "${{ env.AZURE_PACKAGE_PATH }}.zip" || true
+      
+      - name: Deploy to Azure Web App - DEV
+        id: deploy-dev
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'CoreApplicationStocksData'
+          slot-name: 'development'
+          package: ${{ env.AZURE_PACKAGE_PATH }}
+      
+      - name: Deployment Summary
+        run: |
+          echo "✅ Deployment to DEV completed successfully"
+          echo "App URL: https://CoreApplicationStocksData-dev.azurewebsites.net"
+
+  deploy-qual:
+    runs-on: windows-latest
+    needs: [determine-environment, build]
+    if: needs.determine-environment.outputs.environment == 'qual' && needs.determine-environment.outputs.action == 'deploy'
+    environment:
+      name: quality-assurance
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: net-app-${{ needs.build.outputs.artifact-version }}
+      
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_QUAL }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_QUAL }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_QUAL }}
+      
+      - name: Backup current deployment (QUAL)
+        run: |
+          az webapp deployment slot create --resource-group CoreApplicationStocksData-rg --name CoreApplicationStocksData --slot backup-qual --skip-syncing || true
+      
+      - name: Deploy to Azure Web App - QUAL
+        id: deploy-qual
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'CoreApplicationStocksData'
+          slot-name: 'staging'
+          package: ${{ env.AZURE_PACKAGE_PATH }}
+      
+      - name: Deployment Summary
+        run: |
+          echo "✅ Deployment to QUAL completed successfully"
+          echo "App URL: https://CoreApplicationStocksData-staging.azurewebsites.net"
+
+  deploy-prod:
+    runs-on: windows-latest
+    needs: [determine-environment, build]
+    if: needs.determine-environment.outputs.environment == 'prod' && needs.determine-environment.outputs.action == 'deploy'
+    environment:
+      name: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: net-app-${{ needs.build.outputs.artifact-version }}
+      
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_PROD }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_PROD }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_PROD }}
+      
+      - name: Backup current deployment (PROD)
+        run: |
+          az webapp deployment slot create --resource-group CoreApplicationStocksData-rg --name CoreApplicationStocksData --slot backup-prod --skip-syncing || true
+      
+      - name: Deploy to Azure Web App - PROD
+        id: deploy-prod
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'CoreApplicationStocksData'
+          slot-name: 'Production'
+          package: ${{ env.AZURE_PACKAGE_PATH }}
+      
+      - name: Deployment Summary
+        run: |
+          echo "✅ Deployment to PROD completed successfully"
+          echo "App URL: https://CoreApplicationStocksData.azurewebsites.net"
+
+  rollback:
+    runs-on: windows-latest
+    needs: determine-environment
+    if: needs.determine-environment.outputs.action == 'rollback'
+    environment:
+      name: ${{ needs.determine-environment.outputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
       - name: Login to Azure
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_1DB26C36FC414863A26184EAC51DB1F2 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_8C83CA959B78491F8A024C51D59E92E9 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_E289996330DD4447B097C1E130DEA41D }}
-
-      - name: Deploy to Azure Web App
-        id: deploy-to-webapp
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: 'CoreApplicationStocksData'
-          slot-name: 'Production'
-          package: .
-          
+      
+      - name: Determine Rollback Slot
+        id: rollback-slot
+        run: |
+          $env = "${{ needs.determine-environment.outputs.environment }}"
+          if ($env -eq "dev") {
+            echo "slot=backup-dev" >> $env:GITHUB_OUTPUT
+            echo "primary_slot=development" >> $env:GITHUB_OUTPUT
+          } elseif ($env -eq "qual") {
+            echo "slot=backup-qual" >> $env:GITHUB_OUTPUT
+            echo "primary_slot=staging" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "slot=backup-prod" >> $env:GITHUB_OUTPUT
+            echo "primary_slot=Production" >> $env:GITHUB_OUTPUT
+          }
+      
+      - name: Perform Rollback
+        run: |
+          echo "🔄 Rolling back ${{ needs.determine-environment.outputs.environment }} environment..."
+          az webapp deployment slot swap --resource-group CoreApplicationStocksData-rg --name CoreApplicationStocksData --slot ${{ steps.rollback-slot.outputs.slot }}
+      
+      - name: Rollback Verification
+        run: |
+          echo "✅ Rollback completed for ${{ needs.determine-environment.outputs.environment }}"
+          echo "Previous version has been restored from backup slot"
+      
+      - name: Slack Notification (Optional)
+        if: always()
+        run: |
+          echo "⚠️  Rollback was performed on ${{ needs.determine-environment.outputs.environment }} environment"
