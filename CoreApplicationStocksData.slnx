@@ -1,5 +1,3 @@
 <Solution>
-  <Folder Name="/News/">
-    <Project Path="../StocksNews/StocksNews.csproj" Id="9420dc42-86bb-42c4-8262-1416c2080203" />
-  </Folder>
+  <Project Path="../StocksNews/StocksNews.csproj" Id="9420dc42-86bb-42c4-8262-1416c2080203" />
 </Solution>
