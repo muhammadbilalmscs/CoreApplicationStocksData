@@ -1,0 +1,106 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Home page";
+}
+
+<div class="container py-4">
+    <div class="row mb-4">
+        <div class="col-12 text-center">
+            <h1 class="display-4">Top Stocks</h1>
+            <p class="text-muted">Live data powered by Yahoo Finance (via server proxy)</p>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-lg-6 mb-4">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <strong>Top 10 Shares</strong>
+                    <button id="refreshGlobal" class="btn btn-sm btn-outline-primary">Refresh</button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-striped mb-0" id="globalTable">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Name</th>
+                                    <th class="text-end">Price</th>
+                                    <th class="text-end">Change %</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="4" class="text-center py-4">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-6 mb-4">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <strong>Top 10 German Shares</strong>
+                    <button id="refreshGermany" class="btn btn-sm btn-outline-primary">Refresh</button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-striped mb-0" id="germanyTable">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Name</th>
+                                    <th class="text-end">Price</th>
+                                    <th class="text-end">Change %</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr><td colspan="4" class="text-center py-4">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    async function fetchAndRender(url, tableId) {
+        const tbody = document.querySelector(`#${tableId} tbody`);
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4">Loading...</td></tr>`;
+        try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error('Network error');
+            const data = await res.json();
+            if (!Array.isArray(data) || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="4" class="text-center py-4">No data</td></tr>`;
+                return;
+            }
+            tbody.innerHTML = data.map(item => {
+                const price = item.price != null ? item.price.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2}) : '-';
+                const change = item.changePercent != null ? item.changePercent.toFixed(2) + '%' : '-';
+                const changeClass = item.changePercent > 0 ? 'text-success' : (item.changePercent < 0 ? 'text-danger' : '');
+                return `
+                    <tr>
+                        <td><strong>${item.symbol}</strong></td>
+                        <td>${item.name ?? ''}</td>
+                        <td class="text-end">${price} ${item.currency ?? ''}</td>
+                        <td class="text-end ${changeClass}">${change}</td>
+                    </tr>`;
+            }).join('');
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="4" class="text-center text-danger py-4">Error loading data</td></tr>`;
+            console.error(e);
+        }
+    }
+
+    document.getElementById('refreshGlobal').addEventListener('click', () => fetchAndRender('/api/stocks/top', 'globalTable'));
+    document.getElementById('refreshGermany').addEventListener('click', () => fetchAndRender('/api/stocks/germany', 'germanyTable'));
+
+    // initial load
+    fetchAndRender('/api/stocks/top', 'globalTable');
+    fetchAndRender('/api/stocks/germany', 'germanyTable');
+</script>
